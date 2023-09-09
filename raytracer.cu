@@ -1,8 +1,9 @@
-#include <stdio.h>
-#include <math.h>
-#include <assert.h>
 #include "common.h"
+#include "raytracer.cuh"
 #include "solver.cuh"
+#include <assert.h>
+#include <math.h>
+#include <stdio.h>
 
 #define Pi M_PI
 #define SYSTEM_SIZE 5
@@ -25,7 +26,9 @@
  * @param[out]      pPhi          Computed covariant coordinate phi of
  *                  the ray's 4-momentum.
  */
-static __device__ void getCanonicalMomenta(CameraConstants camera, BlackHoleConstants bh, Real rayTheta, Real rayPhi, Real* pR, Real* pTheta, Real* pPhi){
+__device__ void
+RayTracer::getCanonicalMomenta(Real rayTheta, Real rayPhi, Real* pR, Real* pTheta, Real* pPhi)
+{
     // **************************** SET NORMAL **************************** //
     // Cartesian components of the unit vector N pointing in the direction of
     // the incoming ray
@@ -38,7 +41,7 @@ static __device__ void getCanonicalMomenta(CameraConstants camera, BlackHoleCons
     Real den = 1. - camera.beta * Ny;
 
     // Compute factor common to nx and nz
-    Real fac = -sqrt(1. - camera.beta*camera.beta);
+    Real fac = -sqrt(1. - camera.beta * camera.beta);
 
     // Compute cartesian coordinates of the direction of motion. See(A.9)
     Real nY = (-Ny + camera.beta) / den;
@@ -48,13 +51,13 @@ static __device__ void getCanonicalMomenta(CameraConstants camera, BlackHoleCons
     Real Br = 0;
     Real Btheta = 0;
     Real Bphi = 1;
-    Real kappa = sqrt(1 - Btheta*Btheta);
+    Real kappa = sqrt(1 - Btheta * Btheta);
 
     // Convert the direction of motion to the FIDO's spherical orthonormal
     // basis. See (A.10)
-    Real nR =( Bphi * nX / kappa) + (Br * nY) + (Br*Btheta * nZ / kappa);
+    Real nR = (Bphi * nX / kappa) + (Br * nY) + (Br * Btheta * nZ / kappa);
     Real nTheta = (Btheta * nY) - (kappa * nZ);
-    Real nPhi = - (Br * nX / kappa) + (Bphi * nY) + (Bphi*Btheta * nZ / kappa);
+    Real nPhi = -(Br * nX / kappa) + (Bphi * nY) + (Bphi * Btheta * nZ / kappa);
 
     // *********************** SET CANONICAL MOMENTA *********************** //
     // Compute energy as measured by the FIDO. See (A.11)
@@ -83,54 +86,50 @@ static __device__ void getCanonicalMomenta(CameraConstants camera, BlackHoleCons
  * @param[out]      b             Computed axial angular momentum.
  * @param[out]      q             Computed Carter constant.
  */
-static __device__ void getConservedQuantities(CameraConstants camera, BlackHoleConstants bh, Real pTheta, Real pPhi, Real* b, Real* q) {
+__device__ void
+RayTracer::getConservedQuantities(Real pTheta, Real pPhi, Real* b, Real* q)
+{
     // ********************* GET CONSERVED QUANTITIES ********************* //
     // Compute axial angular momentum. See (A.12).
     *b = pPhi;
 
     // Compute Carter constant. See (A.12).
     Real sinT = sin(camera.theta);
-    Real sinT2 = sinT*sinT;
+    Real sinT2 = sinT * sinT;
 
     Real cosT = cos(camera.theta);
-    Real cosT2 = cosT*cosT;
+    Real cosT2 = cosT * cosT;
 
-    Real pTheta2 = pTheta*pTheta;
-    Real b2 = pPhi*pPhi;
+    Real pTheta2 = pTheta * pTheta;
+    Real b2 = pPhi * pPhi;
 
-    *q = pTheta2 + cosT2*((b2/sinT2) - bh.a2);
+    *q = pTheta2 + cosT2 * ((b2 / sinT2) - bh.a2);
 }
 
-
-__global__ void setInitialConditions(CameraConstants camera, BlackHoleConstants bh,
-                                     void* devInitCond,void* devConstants,
-                                     Real pixelWidth, Real pixelHeight){
-    // Each pixel is assigned to a single thread thorugh the grid and block
-    // configuration, both of them being 2D matrices:
-    int row = blockDim.y * blockIdx.y + threadIdx.y;
-    int col = blockDim.x * blockIdx.x + threadIdx.x;
-
+__device__ void
+RayTracer::setInitialConditions(int row, int col, void* devInitCond, void* devConstants)
+{
     // The blocks have always a multiple of 32 threads, configured in a 2D
     // shape. As it is possible that there are more threads than pixels, we
     // have to make sure that only the threads that have an assigned pixel are
     // running.
-    if(row < IMG_ROWS && col < IMG_COLS){
+    if (row < IMG_ROWS && col < IMG_COLS) {
         // Compute pixel unique identifier for this thread
-        int pixel = row*IMG_COLS + col;
+        int pixel = row * IMG_COLS + col;
 
         // Compute the position in the global array to store the initial
         // conditions of this ray
-        Real* globalInitCond = (Real*) devInitCond;
-        Real* initCond = globalInitCond + pixel*SYSTEM_SIZE;
+        Real* globalInitCond = (Real*)devInitCond;
+        Real* initCond = globalInitCond + pixel * SYSTEM_SIZE;
 
         // Compute the position in the global array to store the constants of
         // this ray
-        Real* globalConstants = (Real*) devConstants;
-        Real* constants = globalConstants + pixel*2;
+        Real* globalConstants = (Real*)devConstants;
+        Real* constants = globalConstants + pixel * 2;
 
         // Compute pixel position in physical units
-        Real _x = - (col + 0.5 - IMG_COLS/2) * pixelWidth;
-        Real _y = (row + 0.5 - IMG_ROWS/2) * pixelHeight;
+        Real _x = -(col + 0.5 - IMG_COLS / 2) * camera.pixel_width;
+        Real _y = (row + 0.5 - IMG_ROWS / 2) * camera.pixel_height;
 
         // Rotate the pixels with the roll angle
         Real x = _x * cos(camera.roll) - _y * sin(camera.roll);
@@ -141,13 +140,14 @@ __global__ void setInitialConditions(CameraConstants camera, BlackHoleConstants 
         // order to implement the camera CCD rotation. See pitch, roll and yaw
         // attributes in Camera class (camera.py)
         Real rayPhi = camera.yaw + Pi + atan(x / camera.focal_distance);
-        Real rayTheta = camera.pitch + Pi/2 + atan(y / sqrt(camera.focal_distance*camera.focal_distance + x*x));
+        Real rayTheta = camera.pitch + Pi / 2
+                        + atan(y / sqrt(camera.focal_distance * camera.focal_distance + x * x));
 
         // Compute canonical momenta of the ray and the conserved quantites b
         // and q
         Real pR, pTheta, pPhi, b, q;
-        getCanonicalMomenta(camera, bh, rayTheta, rayPhi, &pR, &pTheta, &pPhi);
-        getConservedQuantities(camera, bh, pTheta, pPhi, &b, &q);
+        getCanonicalMomenta(rayTheta, rayPhi, &pR, &pTheta, &pPhi);
+        getConservedQuantities(pTheta, pPhi, &b, &q);
 
         // Save ray's initial conditions in the global array
         initCond[0] = camera.r;
@@ -162,27 +162,33 @@ __global__ void setInitialConditions(CameraConstants camera, BlackHoleConstants 
     }
 }
 
-__global__ void kernel(BlackHoleConstants bh, Real x0, Real xend, void* devInitCond, Real h,
-                       Real hmax, void* devData, void* devStatus){
-    // Compute pixel's row and col of this thread
-    int row = blockDim.y * blockIdx.y + threadIdx.y;
-    int col = blockDim.x * blockIdx.x + threadIdx.x;
-
+__device__ void
+RayTracer::kernel(
+        int row,
+        int col,
+        Real x0,
+        Real xend,
+        void* devInitCond,
+        Real h,
+        Real hmax,
+        void* devData,
+        void* devStatus)
+{
     // Only the threads that have a proper pixel shall compute its ray equation
-    if(row < IMG_ROWS && col < IMG_COLS){
+    if (row < IMG_ROWS && col < IMG_COLS) {
         // Compute pixel unique identifier for this thread
-        int pixel = row*IMG_COLS + col;
+        int pixel = row * IMG_COLS + col;
 
         // Array of status flags: at the output, the (x,y)-th element will be
         // set to SPHERE, HORIZON or disk, showing the final state of the ray.
-        int* globalStatus = (int*) devStatus;
+        int* globalStatus = (int*)devStatus;
         globalStatus += pixel;
         int status = *globalStatus;
 
         // Integrate the ray only if it's still in the sphere. If it has
         // collided either with the disk or within the horizon, it is not
         // necessary to integrate it anymore.
-        if(status == SPHERE){
+        if (status == SPHERE) {
             // Retrieve the position where the initial conditions this block
             // will work with are.
             // Each block, absolutely identified in the grid by blockId, works
@@ -190,11 +196,11 @@ __global__ void kernel(BlackHoleConstants bh, Real x0, Real xend, void* devInitC
             // equations are in the system). Then, the position of where these
             // initial conditions are stored in the serialized vector can be
             // computed as blockId * N.
-            Real* globalInitCond = (Real*) devInitCond;
+            Real* globalInitCond = (Real*)devInitCond;
             globalInitCond += pixel * SYSTEM_SIZE;
 
             // Pointer to the additional data array used by computeComponent
-            Real* globalData = (Real*) devData;
+            Real* globalData = (Real*)devData;
             globalData += pixel * DATA_SIZE;
 
             // Local arrays to store the initial conditions and the additional
@@ -202,8 +208,8 @@ __global__ void kernel(BlackHoleConstants bh, Real x0, Real xend, void* devInitC
             Real initCond[SYSTEM_SIZE], data[DATA_SIZE];
 
             // Retrieve the data from global to local memory :)
-            memcpy(initCond, globalInitCond, sizeof(Real)*SYSTEM_SIZE);
-            memcpy(data, globalData, sizeof(Real)*DATA_SIZE);
+            memcpy(initCond, globalInitCond, sizeof(Real) * SYSTEM_SIZE);
+            memcpy(data, globalData, sizeof(Real) * DATA_SIZE);
 
             // Current time
             Real x = x0;
@@ -226,14 +232,36 @@ __global__ void kernel(BlackHoleConstants bh, Real x0, Real xend, void* devInitC
             //          the horizon).
             //          2.2. If the answer to the 2. test is positive: update
             //          the status of the ray to HORIZON.
-            status = SolverRK45(bh, &x, xend, initCond, h, xend - x, data, &iterations);
+            status = solver.solve(&x, xend, initCond, h, xend - x, data, &iterations);
 
             // Update the global status variable with the new computed status
             *globalStatus = status;
 
             // And, finally, update the current ray state in global memory :)
-            memcpy(globalInitCond, initCond, sizeof(Real)*SYSTEM_SIZE);
-        } // If status == SPHERE
+            memcpy(globalInitCond, initCond, sizeof(Real) * SYSTEM_SIZE);
+        }  // If status == SPHERE
 
-    } // If row < IMG_ROWS and col < IMG_COLS
+    }  // If row < IMG_ROWS and col < IMG_COLS
+}
+
+__global__ void
+raytrace(
+        const Camera camera,
+        const BlackHoleConstants bh,
+        Real x0,
+        Real xend,
+        void* devInitCond,
+        Real h,
+        Real hmax,
+        void* devConstants,
+        void* devStatus)
+{
+    // Each pixel is assigned to a single thread thorugh the grid and block
+    // configuration, both of them being 2D matrices:
+    int const row = blockDim.y * blockIdx.y + threadIdx.y;
+    int const col = blockDim.x * blockIdx.x + threadIdx.x;
+
+    RayTracer raytracer{camera, bh};
+    raytracer.setInitialConditions(row, col, devInitCond, devConstants);
+    raytracer.kernel(row, col, x0, xend, devInitCond, h, hmax, devConstants, devStatus);
 }

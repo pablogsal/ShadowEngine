@@ -3,7 +3,15 @@ project(RayTracingProject)
 
 # Enable CUDA support
 enable_language(CUDA)
+
+find_package(OpenGL REQUIRED)
+find_package(GLEW REQUIRED)
+find_package(GLUT REQUIRED)
+
 include_directories(${CUDA_INCLUDE_DIRS})
+include_directories(${OPENGL_INCLUDE_DIRS})
+include_directories(${GLEW_INCLUDE_DIRS})
+include_directories(${GLUT_INCLUDE_DIRS})
 
 
 # Set the source files
@@ -18,6 +26,8 @@ set(SOURCES
 # Specify the target
 add_executable(raytracer ${SOURCES})
 target_include_directories(raytracer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(raytracer ${CUDA_LIBRARIES} ${OPENGL_LIBRARIES} ${GLEW_LIBRARIES} ${GLUT_LIBRARIES})
+
 
 # Set the CUDA architecture for the target
 set_target_properties(raytracer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

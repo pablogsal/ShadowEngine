@@ -1,4 +1,11 @@
+#pragma once
 #include "common.h"
+#include "solver.cuh"
+
+
+class RayTracer{
+public:
+    __device__ RayTracer(const Camera& camera, const BlackHoleConstants& bh): camera(camera), bh(bh), solver(bh) {};
 
 
 /**
@@ -52,9 +59,7 @@
  * @param[in]      pixelHeight  Height, in physical units, of the
  *                 camera's pixels.
  */
-__global__ void setInitialConditions(CameraConstants camera, BlackHoleConstants bh,
-                                     void* devInitCond,void* devConstants,
-                                     Real pixelWidth, Real pixelHeight);
+    __device__ void setInitialConditions(int row, int col, void* devInitCond,void* devConstants);
 
 /**
  * CUDA kernel that integrates a set of photons backwards in time from x0 to
@@ -110,5 +115,15 @@ __global__ void setInitialConditions(CameraConstants camera, BlackHoleConstants 
  *                  entry is an integer that will store the ray's status
  *                  at the end of the kernel
  */
-__global__ void kernel(BlackHoleConstants bh, Real x0, Real xend, void* devInitCond, Real h,
-                       Real hmax, void* devData, void* devStatus);
+__device__ void kernel(int row, int col, Real x0, Real xend, void* devInitCond, Real h, Real hmax, void* devData, void* devStatus);
+
+public:
+    const Camera& camera;
+    const BlackHoleConstants& bh;
+    RK45Solver solver;
+
+    __device__ void getCanonicalMomenta(Real rayTheta, Real rayPhi, Real* pR, Real* pTheta, Real* pPhi);
+    __device__ void getConservedQuantities(Real pTheta, Real pPhi, Real* b, Real* q);
+};
+
+__global__ void raytrace(const Camera camera, const BlackHoleConstants bh, Real x0, Real xend, void* devInitCond, Real h, Real hmax, void* devConstants, void* devStatus);

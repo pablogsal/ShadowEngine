@@ -1,189 +1,253 @@
-#include <iostream>
+#include <cassert>
 #include <fstream>
+#include <iostream>
 
+#include <GL/glew.h>
+#include <GL/freeglut.h>
+#include <cuda_gl_interop.h>
 #include <cuda_runtime.h>
 
-#include "raytracer.cuh"
-#include "image_transformation.cuh"
 #include "common.h"
+#include "image_transformation.cuh"
+#include "raytracer.cuh"
 
-
-// Constants
-const Real CAM_SENSOR_HEIGHT = 16.0;
-const Real CAM_SENSOR_WIDTH = 16.0;
-
-const Real H = -0.001;
-const Real HMAX = -150;
-
-const Real X0 = 0;
-const Real XEND = -150;
-
-void writeRawData(const std::string& filename, const Real* data, int numRows, int numCols, int numChannels) {
-    std::ofstream outputFile(filename, std::ios::binary);
-
-    if (!outputFile.is_open()) {
-        std::cerr << "Error opening file: " << filename << std::endl;
-        return;
-    }
-
-    for (int row = 0; row < numRows; ++row) {
-        for (int col = 0; col < numCols; ++col) {
-            for (int channel = 0; channel < numChannels; ++channel) {
-                const Real value = data[(row * numCols + col) * numChannels + channel];
-                outputFile.write(reinterpret_cast<const char*>(&value), sizeof(Real));
-            }
-        }
-    }
-
-    outputFile.close();
-    std::cout << "Raw data written to " << filename << std::endl;
-}
-
-// Function to calculate KerrConstants
-BlackHoleConstants calculateKerrConstants(Real a, const CameraConstants& camera) {
-    BlackHoleConstants constants;
+BlackHoleConstants
+calculateKerrConstants(Real a, const Camera& camera)
+{
+    BlackHoleConstants constants{};
     constants.a = a;
     constants.a2 = a * a;
 
-    Real r2 = camera.r * camera.r;
-    Real a2 = a * a;
+    Real const r2 = camera.r * camera.r;
+    Real const a2 = a * a;
     // Calculate the constants
     constants.ro = sqrt(r2 + a2 * cos(camera.theta) * cos(camera.theta));
     constants.delta = r2 + a2;
-    constants.sigma = sqrt((r2+a2)*(r2+a2) - a2 * constants.delta * sin(camera.theta) * sin(camera.theta));
+    constants.sigma =
+            sqrt((r2 + a2) * (r2 + a2) - a2 * constants.delta * sin(camera.theta) * sin(camera.theta));
     constants.alpha = constants.ro * sqrt(constants.delta) / constants.sigma;
     constants.omega = 2.0 * a * camera.r / (constants.sigma * constants.sigma);
     constants.pomega = constants.sigma * sin(camera.theta) / constants.ro;
     return constants;
 }
 
-struct InitialConditions {
-    Real r;
-    Real theta;
-    Real phi;
-    Real pR;
-    Real pTheta;
-};
+class BlackHoleSimulator
+{
+  public:
+    BlackHoleSimulator()
+    {
+        assert(instance == nullptr);
+        instance = this;
+    }
 
-int main() {
-    // Compute the width and height of a pixel
-    Real pixelWidth = CAM_SENSOR_WIDTH / static_cast<Real>(IMG_COLS);
-    Real pixelHeight = CAM_SENSOR_HEIGHT / static_cast<Real>(IMG_ROWS);
+    void Initialize()
+    {
+        // Initialize OpenGL and create a window
+        glutInit(&argc, argv);
+        glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
+        glutInitWindowSize(IMG_COLS, IMG_ROWS);
+        glutCreateWindow("Black Hole Simulation");
 
-    Real a = 0.2647333333333333;
-    Real r = 40.0;
-    Real theta = 1.413717694115407;
-    Real phi = 0.0;
+        // Initialize GLEW
+        GLenum const err = glewInit();
+        if (err != GLEW_OK) {
+            std::cerr << "GLEW initialization error: " << glewGetErrorString(err) << std::endl;
+            exit(EXIT_FAILURE);
+        }
 
-    Real roll = 0.0;
-    Real pitch = 0.0;
-    Real yaw = -0.06;
+        // Set up OpenGL context and callbacks
+        glutDisplayFunc(DisplayCallbackWrapper);
+        glutKeyboardFunc(KeyboardCallbackWrapper);
 
-    // Initialize the black hole constants
-    CameraConstants camera = {r, theta, phi, roll, pitch, yaw, r/3, 0.0};
-    BlackHoleConstants kerrConstants = calculateKerrConstants(a, camera);
+        // Initialize CUDA
+        cudaSetDevice(0);  // Select the CUDA device (change as needed).
 
-    std::cout << "Camera Constants:" << std::endl;
-    std::cout << "r: " << camera.r << std::endl;
-    std::cout << "theta: " << camera.theta << std::endl;
-    std::cout << "phi: " << camera.phi << std::endl;
-    std::cout << "roll: " << camera.roll << std::endl;
-    std::cout << "pitch: " << camera.pitch << std::endl;
-    std::cout << "yaw: " << camera.yaw << std::endl;
+        // Allocate memory for input and output data on the host.
+        cudaMalloc((void**)&devSystemState, NUM_PIXELS * SYSTEM_SIZE * sizeof(Real));
+        cudaMalloc((void**)&devConstants, NUM_PIXELS * 2 * sizeof(Real));
+        cudaMalloc((void**)&devRayStatus, NUM_PIXELS * sizeof(int));
 
-    std::cout << "Kerr Constants:" << std::endl;
-    std::cout << "a: " << kerrConstants.a << std::endl;
-    std::cout << "a2: " << kerrConstants.a2 << std::endl;
-    std::cout << "ro: " << kerrConstants.ro << std::endl;
-    std::cout << "delta: " << kerrConstants.delta << std::endl;
-    std::cout << "sigma: " << kerrConstants.sigma << std::endl;
-    std::cout << "alpha: " << kerrConstants.alpha << std::endl;
-    std::cout << "omega: " << kerrConstants.omega << std::endl;
-    std::cout << "pomega: " << kerrConstants.pomega << std::endl;
+        // Check for CUDA allocation errors (optional)
+        if (devSystemState == nullptr || devConstants == nullptr || devRayStatus == nullptr) {
+            std::cerr << "CUDA allocation failed." << std::endl;
+            cudaFree(devSystemState);
+            cudaFree(devConstants);
+            cudaFree(devRayStatus);
+            exit(1);
+        }
 
-    // Print the computed pixel size
-    std::cout << "Pixel Width: " << pixelWidth << std::endl;
-    std::cout << "Pixel Height: " << pixelHeight << std::endl;
+        // Initialize CUDA-OpenGL interoperability
+        glGenBuffers(1, &cudaGLBuffer);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cudaGLBuffer);
+        glBufferData(GL_PIXEL_UNPACK_BUFFER, NUM_PIXELS * 3 * sizeof(Real), nullptr, GL_DYNAMIC_DRAW);
+        cudaGraphicsGLRegisterBuffer(&cudaGLResource, cudaGLBuffer, cudaGraphicsMapFlagsNone);
+    }
 
-    // Initialize CUDA
-    cudaSetDevice(0); // Select the CUDA device (change as needed).
+    static void Run()
+    {
+        // Start the OpenGL main loop
+        glutMainLoop();
+    }
 
-    // Allocate memory for input and output data on the host.
-    // You need to define data structures and allocate memory for devInitCond,
-    // devConstants, devData, devStatus, devDiskTexture, devSphereTexture, devImage, etc.
+    static void DisplayCallbackWrapper()
+    {
+        if (instance) {
+            instance->display();
+        }
+    }
 
-    // Allocate the systemState array on the device
-    Real* devSystemState = nullptr;
-    cudaMalloc((void**)&devSystemState, IMG_ROWS * IMG_COLS * SYSTEM_SIZE * sizeof(Real));
+    static void KeyboardCallbackWrapper(unsigned char key, int x, int y)
+    {
+        if (instance) {
+            instance->keyboard(key, x, y);
+        }
+    }
 
-    // Allocate the constants array on the device
-    Real* devConstants = nullptr;
-    cudaMalloc((void**)&devConstants, IMG_ROWS * IMG_COLS * 2 * sizeof(Real));
+    ~BlackHoleSimulator()
+    {
+        cudaGraphicsUnregisterResource(cudaGLResource);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, cudaGLBuffer);
+        glDeleteBuffers(1, &cudaGLBuffer);
+        glutDestroyWindow(glutGetWindow());
 
-    // Allocate the rayStatus array on the device
-    int* devRayStatus = nullptr;
-    cudaMalloc((void**)&devRayStatus, IMG_ROWS * IMG_COLS * sizeof(int));
-
-    // Check for CUDA allocation errors (optional)
-    if (devSystemState == nullptr || devConstants == nullptr || devRayStatus == nullptr) {
-        std::cerr << "CUDA allocation failed." << std::endl;
-        // Handle the error appropriately.
-        // Remember to deallocate any previously allocated memory.
+        // Deallocate memory on the device when done
         cudaFree(devSystemState);
         cudaFree(devConstants);
         cudaFree(devRayStatus);
-        return 1;
+
+        instance = nullptr;
     }
 
-    // Allocate memory for input and output data on the device.
-    // Use cudaMalloc to allocate memory for devInitCond, devConstants, devData, devStatus,
-    // devDiskTexture, devSphereTexture, and devImage.
+  private:
+    int argc = 0;
+    char** argv = nullptr;
 
-    // Call the setInitialConditions kernel to compute initial conditions and constants.
-    std::cout << "Calling setInitialConditions kernel..." << std::endl;
-    dim3 blockDimInit(16, 16);
-    dim3 gridDimInit((IMG_COLS + blockDimInit.x - 1) / blockDimInit.x, (IMG_ROWS + blockDimInit.y - 1) / blockDimInit.y);
-    setInitialConditions<<<gridDimInit, blockDimInit>>>(camera, kerrConstants, devSystemState,devConstants, pixelWidth, pixelHeight);
+    cudaGraphicsResource* cudaGLResource{nullptr};
+    GLuint cudaGLBuffer{};
+    Real* devSystemState{nullptr};
+    Real* devConstants{nullptr};
+    int* devRayStatus{nullptr};
 
+    const Real CAM_SENSOR_HEIGHT = 16.0;
+    const Real CAM_SENSOR_WIDTH = 16.0;
 
-    // Call your main simulation kernel.
-    std::cout << "Calling kernel..." << std::endl;
-    dim3 blockDimKernel(16, 16);
-    dim3 gridDimKernel((IMG_COLS + blockDimKernel.x - 1) / blockDimKernel.x, (IMG_ROWS + blockDimKernel.y - 1) / blockDimKernel.y);
-    kernel<<<gridDimKernel, blockDimKernel>>>(kerrConstants, X0, XEND, devSystemState, H, HMAX, devConstants, devRayStatus);
+    const Real H = -0.001;
+    const Real HMAX = -150;
 
-    // Call the generate_image kernel to generate the final image.
-    Real* devImage = nullptr;
-    cudaMalloc((void**)&devImage, IMG_ROWS * IMG_COLS * 3 * sizeof(Real));
+    const Real X0 = 0;
+    const Real XEND = -150;
 
-    std::cout << "Calling generate_image kernel..." << std::endl;
-    dim3 blockDimGenImage(16, 16);
-    dim3 gridDimGenImage((IMG_COLS + blockDimGenImage.x - 1) / blockDimGenImage.x, (IMG_ROWS + blockDimGenImage.y - 1) / blockDimGenImage.y);
-    generate_image<<<gridDimGenImage, blockDimGenImage>>>(devSystemState, devRayStatus, devImage);
+    Real a{0.2647333333333333};
+    Real r{40.0};
+    Real theta{1.413717694115407};
+    Real phi{0.0};
 
-    // Copy the final image data from the device to the host (devImage to hostImage).
-    std::cout << "Copying image data from device to host..." << std::endl;
-    Real* hostImage = new Real[IMG_ROWS * IMG_COLS * 3];
-    cudaMemcpy(hostImage, devImage, IMG_ROWS * IMG_COLS * 3 * sizeof(Real), cudaMemcpyDeviceToHost);
+    Real roll{0.0};
+    Real pitch{0.0};
+    Real yaw{-0.06};
 
-    // InitialConditions* hostInitCond = new InitialConditions[NUM_PIXELS];
-    // cudaMemcpy(hostInitCond, devSystemState, NUM_PIXELS * sizeof(InitialConditions), cudaMemcpyDeviceToHost);
-    // Real* hostRComponent = new Real[NUM_PIXELS];
-    // for (int i = 0; i < NUM_PIXELS; i++) {
-    //     hostRComponent[i] = hostInitCond[i].r; 
-    // }
-    // writeRawData("output.raw", hostRComponent, IMG_ROWS, IMG_COLS);
+    static BlackHoleSimulator* instance;
 
-    writeRawData("output.raw", hostImage, IMG_ROWS, IMG_COLS, 3);
+    void display()
+    {
+        // Compute the width and height of a pixel
+        Real const pixelWidth = CAM_SENSOR_WIDTH / static_cast<Real>(IMG_COLS);
+        Real const pixelHeight = CAM_SENSOR_HEIGHT / static_cast<Real>(IMG_ROWS);
 
-    // Deallocate memory on the device when done
-    cudaFree(devSystemState);
-    cudaFree(devConstants);
-    cudaFree(devRayStatus);
-    cudaFree(devImage);
-    delete[] hostImage;
+        // Initialize the black hole constants
+        Camera const camera = {r, theta, phi, roll, pitch, yaw, r / 3, 0.0, pixelWidth, pixelHeight};
+        BlackHoleConstants const kerrConstants = calculateKerrConstants(a, camera);
 
+        cudaMemset(devRayStatus, 0, NUM_PIXELS * sizeof(int));
+        dim3 const blockDimKernel(16, 16);
+        dim3 const gridDimKernel(
+                (IMG_COLS + blockDimKernel.x - 1) / blockDimKernel.x,
+                (IMG_ROWS + blockDimKernel.y - 1) / blockDimKernel.y);
+        raytrace<<<gridDimKernel, blockDimKernel>>>(
+                camera,
+                kerrConstants,
+                X0,
+                XEND,
+                devSystemState,
+                H,
+                HMAX,
+                devConstants,
+                devRayStatus);
 
+        std::cout << "Calling generate_image kernel..." << std::endl;
+        // Map the CUDA buffer to OpenGL
+        float* d_mapped_buffer = nullptr;
+        size_t num_bytes;
+        cudaGraphicsMapResources(1, &cudaGLResource, 0);
+        cudaGraphicsResourceGetMappedPointer((void**)&d_mapped_buffer, &num_bytes, cudaGLResource);
 
+        std::cout << "Generate final image..." << std::endl;
+        // Call the generate_image kernel to generate the final image.
+        dim3 const blockDimGenImage(16, 16);
+        dim3 const gridDimGenImage(
+                (IMG_COLS + blockDimGenImage.x - 1) / blockDimGenImage.x,
+                (IMG_ROWS + blockDimGenImage.y - 1) / blockDimGenImage.y);
+        generate_image<<<gridDimGenImage, blockDimGenImage>>>(
+                devSystemState,
+                devRayStatus,
+                d_mapped_buffer);
+
+        // Unmap the CUDA buffer from OpenGL
+        cudaGraphicsUnmapResources(1, &cudaGLResource, 0);
+
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        // If a non-zero named buffer object is bound to the
+        // GL_PIXEL_UNPACK_BUFFER target (see main function) while a block of
+        // pixels is specified, data is treated as a byte offset into the buffer
+        // object's data store.
+        glDrawPixels(IMG_COLS, IMG_ROWS, GL_RGB, GL_FLOAT, 0);  // Use GL_RGB format
+
+        glutSwapBuffers();
+    }
+
+    void keyboard(unsigned char key, int x, int y)
+    {
+        switch (key) {
+            case 'a':  // Move r closer to the black hole
+                r -= 1.0;
+                break;
+            case 'd':  // Move r away from the black hole
+                r += 1.0;
+                break;
+            case 'w':  // Increase theta (look up)
+                theta += 0.01;
+                break;
+            case 's':  // Decrease theta (look down)
+                theta -= 0.01;
+                break;
+            case 'q':  // Rotate phi counterclockwise
+                phi -= 0.01;
+                break;
+            case 'e':  // Rotate phi clockwise
+                phi += 0.01;
+                break;
+            case 'o':
+                a -= 0.01;
+                break;
+            case 'p':
+                a += 0.01;
+                break;
+            case 27:  // ESC key to exit
+                exit(0);
+                break;
+        }
+        glutPostRedisplay();
+    }
+};
+
+BlackHoleSimulator* BlackHoleSimulator::instance = nullptr;
+
+int
+main(int argc, char** argv)
+{
+    BlackHoleSimulator simulator;
+    simulator.Initialize();
+    simulator.Run();
     return 0;
 }

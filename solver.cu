@@ -19,22 +19,70 @@
  * initial conditions. The computation is GPU parallelized using CUDA.
  */
 
- // [1] "Solving Ordinary Differential Equations I", by E. Hairer, S. P.
- // Nørsett and G. Wanner.
- // [2] "Solving Ordinary Differential Equations II", by E. Hairer, S. P.
- // Nørsett and G. Wanner.
- // [3] "A massive parallel ODE integrator for performing general relativistic
- // radiative transfer using ray tracing", by chanchikwan.
- // https://github.com/chanchikwan/gray
- // [4] "GRay: A massively parallel GPU-based code for ray tracing in
- // relativistic spacetimes", by Chi-Kwan Chan, Dimitrios P. Saltis and Feryal
- // Özel.
+// [1] "Solving Ordinary Differential Equations I", by E. Hairer, S. P.
+// Nørsett and G. Wanner.
+// [2] "Solving Ordinary Differential Equations II", by E. Hairer, S. P.
+// Nørsett and G. Wanner.
+// [3] "A massive parallel ODE integrator for performing general relativistic
+// radiative transfer using ray tracing", by chanchikwan.
+// https://github.com/chanchikwan/gray
+// [4] "GRay: A massively parallel GPU-based code for ray tracing in
+// relativistic spacetimes", by Chi-Kwan Chan, Dimitrios P. Saltis and Feryal
+// Özel.
 
-#include <stdio.h>
 #include <math.h>
+#include <stdio.h>
 
 #include "common.h"
 #include "functions.cuh"
+#include "solver.cuh"
+
+// // Bisect's constants
+constexpr Real BISECT_TOL = 0.000001;
+constexpr Real BISECT_MAX_ITER = 100;
+
+// Butcher's tableau coefficients
+constexpr Real A21 = (1. / 5.);
+
+constexpr Real A31 = (3. / 40.);
+constexpr Real A32 = (9. / 40.);
+
+constexpr Real A41 = (44. / 45.);
+constexpr Real A42 = (-56. / 15.);
+constexpr Real A43 = (32. / 9.);
+
+constexpr Real A51 = (19372. / 6561.);
+constexpr Real A52 = (-25360. / 2187.);
+constexpr Real A53 = (64448. / 6561.);
+constexpr Real A54 = (-212. / 729.);
+
+constexpr Real A61 = (9017. / 3168.);
+constexpr Real A62 = (-355. / 33.);
+constexpr Real A63 = (46732. / 5247.);
+constexpr Real A64 = (49. / 176.);
+constexpr Real A65 = (-5103. / 18656.);
+
+constexpr Real A71 = (35. / 384.);
+// constexpr Real A72 = (0);
+constexpr Real A73 = (500. / 1113.);
+constexpr Real A74 = (125. / 192.);
+constexpr Real A75 = (-2187. / 6784.);
+constexpr Real A76 = (11. / 84.);
+
+// constexpr Real C2 = (1. / 5.);
+// constexpr Real C3 = (3. / 10.);
+// constexpr Real C4 = (4. / 5.);
+// constexpr Real C5 = (8. / 9.);
+// constexpr Real C6 = (1);
+// constexpr Real C7 = (1);
+
+constexpr Real E1 = (71. / 57600.);
+// constexpr Real E2 = (0);
+constexpr Real E3 = (-71. / 16695.);
+constexpr Real E4 = (71. / 1920.);
+constexpr Real E5 = (-17253. / 339200.);
+constexpr Real E6 = (22. / 525.);
+constexpr Real E7 = (-1. / 40.);
 
 /**
  * This method uses DOPRI5 to advance a time of \p h the system stored in \p
@@ -48,25 +96,22 @@
  * @param[in]       data Additional data used by the rhs of the system.
  * @return      The normalized estimated error of the step.
  */
-static inline __device__ Real advanceStep(BlackHoleConstants bh, Real* y0, Real h, Real* y1, Real* data){
+__device__ Real
+RK45Solver::advanceStep(Real* y0, Real h, Real* y1, Real* data)
+{
     // Auxiliary variables used to compute the errors at each step.
-    float sqr;                  // Scaled differences in each eq.
+    float sqr;  // Scaled differences in each eq.
     float errors[SYSTEM_SIZE];  // Local error of each eq.
-    float err = 0;              // Global error of the step
-    float sk;                   // Scale based on the tolerances
+    float err = 0;  // Global error of the step
+    float sk;  // Scale based on the tolerances
 
     // Declare a counter for the loops, in order not to declare it multiple
     // times :)
     int i;
 
     // Auxiliar arrays to store the intermediate K1, ..., K7 computations
-    Real k1[SYSTEM_SIZE],
-         k2[SYSTEM_SIZE],
-         k3[SYSTEM_SIZE],
-         k4[SYSTEM_SIZE],
-         k5[SYSTEM_SIZE],
-         k6[SYSTEM_SIZE],
-         k7[SYSTEM_SIZE];
+    Real k1[SYSTEM_SIZE], k2[SYSTEM_SIZE], k3[SYSTEM_SIZE], k4[SYSTEM_SIZE], k5[SYSTEM_SIZE],
+            k6[SYSTEM_SIZE], k7[SYSTEM_SIZE];
 
     // Compute the K1, ..., K7 components and the estimated solution, using
     // the Butcher's table described in Table 5.2 ([1])
@@ -75,52 +120,38 @@ static inline __device__ Real advanceStep(BlackHoleConstants bh, Real* y0, Real 
     computeComponent(bh, y0, k1, data);
 
     // K2 computation
-    for(i = 0; i < SYSTEM_SIZE; i++){
+    for (i = 0; i < SYSTEM_SIZE; i++) {
         y1[i] = y0[i] + h * A21 * k1[i];
     }
     computeComponent(bh, y1, k2, data);
 
     // K3 computation
-    for(i = 0; i < SYSTEM_SIZE; i++){
-        y1[i] = y0[i] + h*(A31 * k1[i] +
-                           A32 * k2[i]);
+    for (i = 0; i < SYSTEM_SIZE; i++) {
+        y1[i] = y0[i] + h * (A31 * k1[i] + A32 * k2[i]);
     }
     computeComponent(bh, y1, k3, data);
 
     // K4 computation
-    for(i = 0; i < SYSTEM_SIZE; i++){
-        y1[i] = y0[i] + h*(A41 * k1[i] +
-                           A42 * k2[i] +
-                           A43 * k3[i]);
+    for (i = 0; i < SYSTEM_SIZE; i++) {
+        y1[i] = y0[i] + h * (A41 * k1[i] + A42 * k2[i] + A43 * k3[i]);
     }
     computeComponent(bh, y1, k4, data);
 
     // K5 computation
-    for(i = 0; i < SYSTEM_SIZE; i++){
-        y1[i] = y0[i] + h*( A51 * k1[i] +
-                            A52 * k2[i] +
-                            A53 * k3[i] +
-                            A54 * k4[i]);
+    for (i = 0; i < SYSTEM_SIZE; i++) {
+        y1[i] = y0[i] + h * (A51 * k1[i] + A52 * k2[i] + A53 * k3[i] + A54 * k4[i]);
     }
     computeComponent(bh, y1, k5, data);
 
     // K6 computation
-    for(i = 0; i < SYSTEM_SIZE; i++){
-        y1[i] = y0[i] + h*(A61 * k1[i] +
-                           A62 * k2[i] +
-                           A63 * k3[i] +
-                           A64 * k4[i] +
-                           A65 * k5[i]);
+    for (i = 0; i < SYSTEM_SIZE; i++) {
+        y1[i] = y0[i] + h * (A61 * k1[i] + A62 * k2[i] + A63 * k3[i] + A64 * k4[i] + A65 * k5[i]);
     }
     computeComponent(bh, y1, k6, data);
 
     // K7 computation.
-    for(i = 0; i < SYSTEM_SIZE; i++){
-        y1[i] = y0[i] + h*(A71 * k1[i] +
-                           A73 * k3[i] +
-                           A74 * k4[i] +
-                           A75 * k5[i] +
-                           A76 * k6[i]);
+    for (i = 0; i < SYSTEM_SIZE; i++) {
+        y1[i] = y0[i] + h * (A71 * k1[i] + A73 * k3[i] + A74 * k4[i] + A75 * k5[i] + A76 * k6[i]);
     }
     computeComponent(bh, y1, k7, data);
 
@@ -135,31 +166,26 @@ static inline __device__ Real advanceStep(BlackHoleConstants bh, Real* y0, Real 
     // from y, the differences between the coefficientes of each
     // solution have been computed and the error is directly obtained
     // using them:
-    for(i = 0; i < SYSTEM_SIZE; i++){
-        errors[i] = h*(E1 * k1[i] +
-                       E3 * k3[i] +
-                       E4 * k4[i] +
-                       E5 * k5[i] +
-                       E6 * k6[i] +
-                       E7 * k7[i]);
+    for (i = 0; i < SYSTEM_SIZE; i++) {
+        errors[i] = h * (E1 * k1[i] + E3 * k3[i] + E4 * k4[i] + E5 * k5[i] + E6 * k6[i] + E7 * k7[i]);
     }
 
     err = 0;
-    for(i = 0; i < SYSTEM_SIZE; i++){
+    for (i = 0; i < SYSTEM_SIZE; i++) {
         // The local estimated error has to satisfy the following
         // condition: |err[i]| < Atol[i] + Rtol*max(|y_0[i]|, |y_j[i]|)
         // (see equation (4.10), [1]). The variable sk stores the right
         // hand size of this inequality to use it as a scale in the local
         // error computation; this way we "normalize" the error and we can
         // compare it against 1.
-        sk = atoli + rtoli*fmax(fabs(y0[i]), fabs(y1[i]));
+        sk = atoli + rtoli * fmax(fabs(y0[i]), fabs(y1[i]));
 
         // Compute the square of the local estimated error (scaled with the
         // previous factor), as the global error will be computed as in
         // equation 4.11 ([1]): the square root of the mean of the squared
         // local scaled errors.
-        sqr = (errors[i])/sk;
-        errors[i] = sqr*sqr;
+        sqr = (errors[i]) / sk;
+        errors[i] = sqr * sqr;
 
         err += errors[i];
     }
@@ -171,7 +197,6 @@ static inline __device__ Real advanceStep(BlackHoleConstants bh, Real* y0, Real 
 
     return err;
 }
-
 
 /**
  * This function receives the current state of a ray that has just crossed the
@@ -195,7 +220,9 @@ static inline __device__ Real advanceStep(BlackHoleConstants bh, Real* y0, Real 
  * @param[in]       x Current time.
  * @return          Number of iterations used in the binary search.
  */
-static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data, Real step, Real x){
+__device__ int
+RK45Solver::bisect(Real* yOriginal, Real* data, Real step, Real x)
+{
     // It is necessary to maintain the previous theta to know the direction
     // change; we'll store it centered in zero, and not in pi/2 in order to
     // removes some useless substractions in the main loop.
@@ -203,7 +230,7 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
     prevThetaCentered = yOriginal[1] - HALF_PI;
 
     // The first step shall be to the other side and half of its length.
-    step = - step * 0.5;
+    step = -step * 0.5;
 
     // Loop variables, to control that the iterations does not exceed a maximum
     // number
@@ -222,10 +249,10 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
     //      3. It repeats 1 and 2 until the current theta is very near of Pi/2
     //      ("very near" is defined by BISECT_TOL) or until the number of
     //      iterations exceeds a maximum number previously defined.
-    while(fabs(prevThetaCentered) > BISECT_TOL && iter < BISECT_MAX_ITER){
+    while (fabs(prevThetaCentered) > BISECT_TOL && iter < BISECT_MAX_ITER) {
         // 1. Advance the ray one step.
-        advanceStep(bh, yOriginal, step, yNew, data);
-        memcpy(yOriginal, yNew, sizeof(Real)*SYSTEM_SIZE);
+        advanceStep(yOriginal, step, yNew, data);
+        memcpy(yOriginal, yNew, sizeof(Real) * SYSTEM_SIZE);
         x += step;
 
         // Compute the current theta, centered in zero
@@ -233,13 +260,13 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
 
         // 2. Change the step direction whenever theta crosses the target,
         // pi/2, and make it half of the previous one.
-        step = step * sign(currentThetaCentered)*sign(prevThetaCentered) * 0.5;
+        step = step * sign(currentThetaCentered) * sign(prevThetaCentered) * 0.5;
 
         // Update the previous theta, centered in zero, with the current one
         prevThetaCentered = currentThetaCentered;
 
         iter++;
-    } // 3. End of while
+    }  // 3. End of while
 
     // Return the number of iterations spent in the loop
     return iter;
@@ -281,8 +308,16 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
  * @param[out]    iterations   Output variable to know how many
  *                iterations were spent in the computation
  */
- __device__ int SolverRK45(BlackHoleConstants bh, Real* globalX0, Real xend, Real* initCond,
-                           Real hOrig, Real hmax, Real* data, int* iterations){
+__device__ int
+RK45Solver::solve(
+        Real* globalX0,
+        Real xend,
+        Real* initCond,
+        Real hOrig,
+        Real hmax,
+        Real* data,
+        int* iterations)
+{
     // Loop variable to manage the automatic step size detection.
     Real hnew;
 
@@ -297,7 +332,7 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
     hmax = abs(hmax);
 
     // Precompute size of the ray's state in bytes
-    size_t sizeBytes = sizeof(Real)*SYSTEM_SIZE;
+    size_t sizeBytes = sizeof(Real) * SYSTEM_SIZE;
 
     // Each thread of each block has to know only the initial condition
     // associated to its own equation:
@@ -339,7 +374,8 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
     // Initial status of the ray: SPHERE
     int status = SPHERE;
 
-    // Main loop. Each iteration computes a single step of the DOPRI5 algorithm, that roughly comprises the next phases:
+    // Main loop. Each iteration computes a single step of the DOPRI5 algorithm, that roughly comprises
+    // the next phases:
     //  0. Check that the expected step does not exceed the final time.
     //  1. Computation of the system new value and the estimated error.
     //  2. Computation of the new step size.
@@ -349,13 +385,13 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
     //          3.2.1 If the ray has crossed the equatorial plane (theta =
     //          pi/2), find the exact point where this cross occured, updating
     //          the ray's status to DISK if a collision is found.
-    do{
+    do {
         *iterations = *iterations + 1;
 
         // Check that the step size is not too small and that the horizon is
         // not too near. In both cases, set the ray's status to HORIZON and
         // stop the computation
-        if (0.1 * abs(h) <= abs(x0) * uround || (y0[0] - horizonRadius <= 1e-3)){
+        if (0.1 * abs(h) <= abs(x0) * uround || (y0[0] - horizonRadius <= 1e-3)) {
             // Let the user know the computation stopped before xEnd
             status = HORIZON;
             break;
@@ -364,13 +400,13 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
         // PHASE 0. Check if the current time x_0 plus the current step
         // (multiplied by a safety factor to prevent steps too small)
         // exceeds the end time x_{end}.
-         if ((x0 + 1.01*h - xend) * integrationDirection > 0.0){
-             h = xend - x0;
-         }
+        if ((x0 + 1.01 * h - xend) * integrationDirection > 0.0) {
+            h = xend - x0;
+        }
 
         // PHASE 1. Compute the new state of the system and the estimated
         // error of the step.
-        err = advanceStep(bh, y0, h, y1, data);
+        err = advanceStep(y0, h, y1, data);
 
         // PHASE 2. Compute the new step size.
         //
@@ -386,7 +422,7 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
         // the previous accepted error
 
         // Stabilization computations:
-        fac11 = pow (err, expo1);
+        fac11 = pow(err, expo1);
         fac = fac11 / pow(facold, (float)_beta);
 
         // We need the multiplying factor (always taking into account the
@@ -402,7 +438,7 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
         //
         // Check whether the normalized error, err, is below or over 1.:
         // PHASE 3.1: REJECT STEP if err > 1.
-        if( err > 1.){
+        if (err > 1.) {
             // Stabilization technique with the minimum and safe factors
             // when the step is rejected.
             hnew = h / fmin(fac1_inverse, fac11 * safeInv);
@@ -411,7 +447,8 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
             reject = true;
         }
         // PHASE 3.2: ACCEPT STEP if err <= 1.
-        else{
+        else
+        {
             // TODO: Stiffness detection
 
             // Update old factor to new current error (upper bounded to
@@ -423,13 +460,11 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
 
             // Assure the new step size does not exceeds the provided
             // bounds.
-            if (fabs(hnew) > hmax)
-                hnew = integrationDirection * hmax;
+            if (fabs(hnew) > hmax) hnew = integrationDirection * hmax;
 
             // If the previous step was rejected, take the minimum of the
             // old and new step sizes
-            if (reject)
-                hnew = integrationDirection * fmin(fabs(hnew), fabs(h));
+            if (reject) hnew = integrationDirection * fmin(fabs(hnew), fabs(h));
 
             // This step was accepted, so it was not rejected, so reject is
             // false. SCIENCE.
@@ -444,10 +479,10 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
             currentThetaSign = sign(y1[1] - HALF_PI);
 
             // Check whether the ray has crossed theta = pi/2
-            if(prevThetaSign != currentThetaSign){
+            if (prevThetaSign != currentThetaSign) {
                 // Call bisect in order to find the exact spot where theta =
                 // pi/2
-                bisectIter += bisect(bh, y1, data, h, x0);
+                bisectIter += bisect(y1, data, h, x0);
 
                 // Retrieve the current r
                 currentR = y1[0];
@@ -455,8 +490,8 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
                 // Finally, check whether the current r is inside the disk,
                 // updating the status and copying back the data in the
                 // case it is.
-                if(innerDiskRadius<currentR && currentR<outerDiskRadius){
-                    memcpy(y0, y1, sizeof(Real)*SYSTEM_SIZE);
+                if (innerDiskRadius < currentR && currentR < outerDiskRadius) {
+                    memcpy(y0, y1, sizeof(Real) * SYSTEM_SIZE);
                     status = DISK;
                     break;
                 }
@@ -468,7 +503,7 @@ static __device__ int bisect(BlackHoleConstants bh, Real* yOriginal, Real* data,
 
         // Final step size update!
         h = hnew;
-    }while(x0 > xend);
+    } while (x0 > xend);
 
     // Aaaaand that's all, folks! Update system value (each thread its
     // result) in the global memory :)

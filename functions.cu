@@ -3,7 +3,9 @@
 
 #include "common.h"
 
-__device__ void computeComponent(BlackHoleConstants bh, Real* y, Real* f, Real* data){
+__device__ void
+computeComponent(BlackHoleConstants bh, Real* y, Real* f, Real* data)
+{
     // Variables to hold the position of the ray, its momenta and related
     // operations between them and the constant a, which is the spin of the
     // black hole.
@@ -26,13 +28,13 @@ __device__ void computeComponent(BlackHoleConstants bh, Real* y, Real* f, Real* 
     pTheta = y[4];
 
     // Computation of the square of r, widely used in the computations.
-    r2 = r*r;
+    r2 = r * r;
 
     // Sine and cosine of theta, as well as their squares and inverses.
     sincos(theta, &sinT, &cosT);
-    sinT2 = sinT*sinT;
-    sinT2Inv = 1/sinT2;
-    cosT2 = cosT*cosT;
+    sinT2 = sinT * sinT;
+    sinT2Inv = 1 / sinT2;
+    cosT2 = cosT * cosT;
 
     // Retrieval of the constants data: b and q, along with the computation of
     // the square of b and the number b - a, repeateadly used throughout the
@@ -40,30 +42,30 @@ __device__ void computeComponent(BlackHoleConstants bh, Real* y, Real* f, Real* 
     b = data[0];
     q = data[1];
 
-    b2 = b*b;
+    b2 = b * b;
     bMinusA = b - bh.a;
 
     // Commonly used variables: R, D, Theta (that is called Z) and
     // rho (and its square and cube).
-    D = r2 - 2*r + bh.a2;
-    Dinv = 1/D;
+    D = r2 - 2 * r + bh.a2;
+    Dinv = 1 / D;
 
     P = r2 - bh.a * bMinusA;
-    R = P*P - D*(bMinusA*bMinusA + q);
+    R = P * P - D * (bMinusA * bMinusA + q);
 
-    Z = q - cosT2*(b2*sinT2Inv - bh.a2);
+    Z = q - cosT2 * (b2 * sinT2Inv - bh.a2);
 
-    rho2Inv = 1/(r2 + bh.a2*cosT2);
-    twoRho2Inv = rho2Inv/2;
-    rho4Inv = rho2Inv*rho2Inv;
+    rho2Inv = 1 / (r2 + bh.a2 * cosT2);
+    twoRho2Inv = rho2Inv / 2;
+    rho4Inv = rho2Inv * rho2Inv;
 
     // Squares of the momenta components
-    pR2 = pR*pR;
-    pTheta2 = pTheta*pTheta;
+    pR2 = pR * pR;
+    pTheta2 = pTheta * pTheta;
 
     // Double b and double r, that's it! :)
-    twob = 2*b;
-    twor = 2*r;
+    twob = 2 * b;
+    twor = 2 * r;
 
     // Declaration of variables used in the actual computation: dR, dZ, dRho
     // and dD will store the derivatives of the corresponding functions (with
@@ -80,43 +82,42 @@ __device__ void computeComponent(BlackHoleConstants bh, Real* y, Real* f, Real* 
 
     // *********************** EQUATION 3 *********************** //
     // Derivatives with respect to b
-    dR = 4*bMinusA*r - twob*r2;
-    dZ = - twob * cosT2 * sinT2Inv;
+    dR = 4 * bMinusA * r - twob * r2;
+    dZ = -twob * cosT2 * sinT2Inv;
 
-    f[2] = - (dR + D*dZ)*Dinv*twoRho2Inv;
+    f[2] = -(dR + D * dZ) * Dinv * twoRho2Inv;
 
     // *********************** EQUATION 4 *********************** //
     // Derivatives with respect to r
     dD = twor - 2;
-    dR = 2*twor*(r2 - bh.a*bMinusA) - (q + bMinusA*bMinusA)*(twor - 2);
+    dR = 2 * twor * (r2 - bh.a * bMinusA) - (q + bMinusA * bMinusA) * (twor - 2);
 
-    DZplusR = D*Z + R;
+    DZplusR = D * Z + R;
 
-    sum1 = + pTheta2;
-    sum2 = + D*pR2;
-    sum3 = - (DZplusR * Dinv);
-    sum4 = - (dD*pR2);
-    sum5 = + (dD*Z + dR) * Dinv;
-    sum6 = - (dD*DZplusR * Dinv * Dinv);
+    sum1 = +pTheta2;
+    sum2 = +D * pR2;
+    sum3 = -(DZplusR * Dinv);
+    sum4 = -(dD * pR2);
+    sum5 = +(dD * Z + dR) * Dinv;
+    sum6 = -(dD * DZplusR * Dinv * Dinv);
 
-    f[3] = r*(sum1 + sum2 + sum3)*rho4Inv + (sum4 + sum5 + sum6)*twoRho2Inv;
+    f[3] = r * (sum1 + sum2 + sum3) * rho4Inv + (sum4 + sum5 + sum6) * twoRho2Inv;
 
     // *********************** EQUATION 5 *********************** //
     // Derivatives with respect to theta (called z here)
-    dRhoTimesRho = - bh.a2*cosT*sinT;
+    dRhoTimesRho = -bh.a2 * cosT * sinT;
 
-    Real cosT3 = cosT2*cosT;
-    Real sinT3 = sinT2*sinT;
+    Real cosT3 = cosT2 * cosT;
+    Real sinT3 = sinT2 * sinT;
 
-    dZ = 2*cosT*((b2*sinT2Inv) - bh.a2)*sinT + (2*b2*cosT3)/(sinT3);
+    dZ = 2 * cosT * ((b2 * sinT2Inv) - bh.a2) * sinT + (2 * b2 * cosT3) / (sinT3);
 
-    sum1 = + pTheta2;
-    sum2 = + D*pR2;
-    sum3 = - DZplusR * Dinv;
-    sum4 = + dZ * twoRho2Inv;
+    sum1 = +pTheta2;
+    sum2 = +D * pR2;
+    sum3 = -DZplusR * Dinv;
+    sum4 = +dZ * twoRho2Inv;
 
-    f[4] = dRhoTimesRho*(sum1 + sum2 + sum3)*rho4Inv + sum4;
-
+    f[4] = dRhoTimesRho * (sum1 + sum2 + sum3) * rho4Inv + sum4;
 
     // // Euclidean version
     // f[0] = pR;
@@ -126,4 +127,4 @@ __device__ void computeComponent(BlackHoleConstants bh, Real* y, Real* f, Real* 
     // f[4] =   ( b2 ) / ( r2* sinT2) * cosT/sinT;
 }
 
-#endif // __FUNCTIONS__
+#endif  // __FUNCTIONS__
